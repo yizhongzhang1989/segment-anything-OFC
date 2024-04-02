@@ -22,6 +22,8 @@ input_ori_shape = (720, 1280)
 DEBUG_MODE = os.getenv('DEBUG_ON', 'False').lower() in ('true', '1')
 print('Debug mode: ' + ('ON' if DEBUG_MODE is True else 'OFF'))
 
+BUSY_TEST = os.getenv('BUSY_TEST_ON', 'False').lower() in ('true', '1')
+print('Busy test mode: ' + ('ON' if BUSY_TEST is True else 'OFF'))
 
 
 def update_learning_rate(
@@ -60,6 +62,7 @@ def finetune(args):
     init_lr = args.lr                               # init_lr = 1e-4
     num_epoches = args.epoch_num
     save_epoch_interval = args.save_interval
+    test_iter_interval = args.test_interval
     exp_path = os.path.join('exp', args.exp_name)   #'exp/finetune_first_test'
     batch_size = args.batch_size
     device = args.device
@@ -68,6 +71,7 @@ def finetune(args):
     with_test_dataset = args.test_dir is not None
     if with_test_dataset:
         dataset_test_path = args.test_dir
+    is_full_finetune = args.full_tune
 
     os.makedirs(exp_path, exist_ok=True)
     os.makedirs(os.path.join(exp_path, 'details'), exist_ok=True)
@@ -104,7 +108,7 @@ def finetune(args):
         test_dataset = CableDataset(dataset_test_path, input_ori_shape, sam_model.image_encoder.img_size)
         test_dataloader = DataLoader(
             dataset=test_dataset, 
-            batch_size=batch_size, 
+            batch_size=batch_size // 4, 
             shuffle=False,
             num_workers=4, 
             pin_memory=True
@@ -144,7 +148,9 @@ Training parameters:
     max epoch: {num_epoches} 
     batch_size: {batch_size} 
     checkpoint save interval (num of epoches): {save_epoch_interval} 
+    test interval (num of iterations): {test_iter_interval} 
     device: {device} 
+    finetune: {'image encoder and mask decoder' if is_full_finetune else 'mask decoder only'}
     scheduler: {lr_scheduler}
         milestones: {lr_scheduler.milestones}
         gamma: {lr_scheduler.gamma}
@@ -190,7 +196,7 @@ Other information:
 
     def forward_loop(
             sample: Dict[Literal['image', 'mask', 'name'], Any], 
-            mode: Literal['train', 'test'] = 'train', 
+            mode: Literal['train', 'test', 'busy_test'] = 'train', 
             cur_epoch: int = 0
         ) -> Tuple[float, np.ndarray]:
         """
@@ -213,8 +219,8 @@ Other information:
             update_learning_rate(optimizer, iteration_count, warm_up_iterations, init_lr)
 
         ################=================== Forward ===================################
-        # No grad here as we don't want to optimise the encoders
-        with torch.no_grad():
+        # full finetune
+        if is_full_finetune:
             image_embedding = sam_model.image_encoder(transformed_image)
 
             prompt_box = torch.tensor(
@@ -229,6 +235,23 @@ Other information:
                 boxes=prompt_box,
                 masks=None,
             )
+        # No grad here as we don't want to optimise the encoders
+        else:
+            with torch.no_grad():
+                image_embedding = sam_model.image_encoder(transformed_image)
+
+                prompt_box = torch.tensor(
+                    [0, 0, sam_model.image_encoder.img_size, sam_model.image_encoder.img_size], 
+                    dtype=torch.float, 
+                    device=device
+                )
+                prompt_box = prompt_box.tile((cur_batch, 1))
+
+                sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
+                    points=None,
+                    boxes=prompt_box,
+                    masks=None,
+                )
         
         low_res_masks, iou_predictions = sam_model.mask_decoder(
             image_embeddings=image_embedding,
@@ -238,15 +261,13 @@ Other information:
             multimask_output=False,
         )
 
-        upscaled_masks = sam_model.postprocess_masks(low_res_masks, input_shape, input_ori_shape).to(device)
-        # set negative values to 0
-        binary_mask = normalize(threshold(upscaled_masks, 0.0, 0))
+        upscaled_mask_logits = sam_model.postprocess_masks(low_res_masks, input_shape, input_ori_shape).to(device)
         gt_binary_mask = torch.as_tensor(gt_mask, dtype=torch.float32)
-
-        loss = loss_fn(binary_mask, gt_binary_mask)
+        loss = loss_fn(upscaled_mask_logits, gt_binary_mask)
 
         #####
         if DEBUG_MODE:
+            binary_mask = upscaled_mask_logits > 0
             plt.figure(figsize=(12, 4))
             plt.subplot(1, 3, 1)
             plt.imshow(binary_mask[0].detach().cpu().numpy().squeeze())
@@ -274,13 +295,26 @@ Other information:
             if not no_log_flag:
                 wandb.log({'training_loss': loss.item()}, step=iteration_count)
         elif mode == 'test':
-            pred_bool_masks = torch.as_tensor(binary_mask, dtype=torch.bool)
+            pred_bool_masks = upscaled_mask_logits > 0
             gt_bool_masks = torch.as_tensor(gt_mask, dtype=torch.bool)
             tp = torch.sum(pred_bool_masks & gt_bool_masks).item()
             tn = torch.sum(~pred_bool_masks & ~gt_bool_masks).item()
             fp = torch.sum(pred_bool_masks & ~gt_bool_masks).item()
             fn = torch.sum(~pred_bool_masks & gt_bool_masks).item()
-
+        elif mode == 'busy_test':
+            pred_bool_masks = upscaled_mask_logits > 0
+            gt_bool_masks = torch.as_tensor(gt_mask, dtype=torch.bool)
+            tp = torch.sum(pred_bool_masks & gt_bool_masks).item()
+            tn = torch.sum(~pred_bool_masks & ~gt_bool_masks).item()
+            fp = torch.sum(pred_bool_masks & ~gt_bool_masks).item()
+            fn = torch.sum(~pred_bool_masks & gt_bool_masks).item()
+            
+            pred_prob_map = torch.sigmoid(upscaled_mask_logits[0])
+            pred_prob_map_out: np.ndarray = pred_prob_map.cpu().numpy() * 255
+            pred_prob_map_out = pred_prob_map_out.astype(np.uint8)
+            pred_bin_mask_out: np.ndarray = pred_bool_masks[0].cpu().numpy().astype(np.uint8) * 255
+            cv2.imwrite(os.path.join(exp_path, 'details', 'busy_test', 'probs', f't{iteration_count}_' + test_sample['name'][0]), pred_prob_map_out.squeeze())
+            cv2.imwrite(os.path.join(exp_path, 'details', 'busy_test', 'bin_masks', f't{iteration_count}_' + test_sample['name'][0]), pred_bin_mask_out.squeeze())
         #plt.plot(all_losses)
         #plt.title(f'Loss curve (batch size = {train_dataloader.batch_size})')
         #plt.xlabel('Iteration')
@@ -301,93 +335,51 @@ Other information:
             epoch_losses.append(cur_loss)
             all_losses.append(cur_loss)
 
-            ######################################## DELETE THIS!!!
-            if iteration_count % 10 == 0:
-                test_loss = 0
-                for j, test_sample in enumerate(test_dataloader):
-                    with torch.no_grad():
-                        input_image = test_sample['image'].to(device)
-                        gt_mask = test_sample['mask'].to(device)
-                        cur_batch = input_image.shape[0]
+            ######################################## TEMPERARY TEST !
+            if BUSY_TEST:
+                os.makedirs(os.path.join(exp_path, 'details', 'busy_test', 'probs'), exist_ok=True)
+                os.makedirs(os.path.join(exp_path, 'details', 'busy_test', 'bin_masks'), exist_ok=True)
 
-                        transformed_image = sam_model.preprocess(input_image)
-                        input_shape = tuple(input_image.shape[-2:])
+                if iteration_count > 500:
+                    return
+            ######################################## TEMPERARY TEST !
 
-                        ################=================== Forward ===================################
-                        image_embedding = sam_model.image_encoder(transformed_image)
+            ################# test loop #################
+            if with_test_dataset:
+                if (iteration_count % test_iter_interval == 0) or (BUSY_TEST and iteration_count % 10 == 0):
+                    test_loss = 0
+                    test_stats = np.array([0, 0, 0, 0])     # tp, tn, fp, fn
+                    test_mode = 'busy_test' if BUSY_TEST else 'test' 
+                    for j, test_sample in enumerate(test_dataloader):
+                        with torch.no_grad():
+                            cur_loss, cur_stats = forward_loop(test_sample, mode=test_mode, cur_epoch=e)
+                            test_loss += cur_loss
+                            test_stats += cur_stats
 
-                        prompt_box = torch.tensor(
-                            [0, 0, sam_model.image_encoder.img_size, sam_model.image_encoder.img_size], 
-                            dtype=torch.float, 
-                            device=device
+                    if not no_log_flag:
+                        wandb.log(
+                            {
+                                'test_loss': test_loss / len(test_dataloader),
+                                'test_accuracy': (test_stats[0] + test_stats[1]) / np.sum(test_stats), 
+                                'test_precision': test_stats[0] / (test_stats[0] + test_stats[2]), 
+                                'test_recall': test_stats[0] / (test_stats[0] + test_stats[3])
+                            }, 
+                            step=iteration_count
                         )
-                        prompt_box = prompt_box.tile((cur_batch, 1))
+                    tqdm.write(f'Test: [tp, tn, fp, fn] = {test_stats}')
 
-                        sparse_embeddings, dense_embeddings = sam_model.prompt_encoder(
-                            points=None,
-                            boxes=prompt_box,
-                            masks=None,
-                        )
-                        
-                        low_res_masks, iou_predictions = sam_model.mask_decoder(
-                            image_embeddings=image_embedding,
-                            image_pe=sam_model.prompt_encoder.get_dense_pe(),
-                            sparse_prompt_embeddings=sparse_embeddings,
-                            dense_prompt_embeddings=dense_embeddings,
-                            multimask_output=False,
-                        )
-
-                        upscaled_masks = sam_model.postprocess_masks(low_res_masks, input_shape, input_ori_shape).to(device)
-                        # set negative values to 0
-                        binary_mask = normalize(threshold(upscaled_masks, 0.0, 0))
-                        gt_binary_mask = torch.as_tensor(gt_mask, dtype=torch.float32)
-
-                        loss = loss_fn(binary_mask, gt_binary_mask)
-
-                        test_loss += loss.item()
-
-                        pred_out_masks = torch.as_tensor(binary_mask[0], dtype=torch.uint8) * 255
-                        pred_out_masks = pred_out_masks.cpu().numpy()
-                        os.makedirs(os.path.join(exp_path, 'details', 'test'), exist_ok=True)
-                        cv2.imwrite(os.path.join(exp_path, 'details', 'test', f't{iteration_count}_' + test_sample['name'][0]), pred_out_masks.squeeze())
-                test_loss /= len(test_dataloader)
-                
-                with open(os.path.join(exp_path, 'details', 'test', 'test_errs.txt'), 'a') as log_file:  
-                    log_file.write(str(test_loss) + '\n')
-
-            if iteration_count > 500:
-                return
-            ######################################## DELETE THIS!!!
+                    if BUSY_TEST:
+                        with open(os.path.join(exp_path, 'details', 'busy_test', 'test_errs.txt'), 'a') as log_file:  
+                            log_file.write(str(test_loss) + '\n')
+            ################## End test loop
         # End epoch
             
         if e % save_epoch_interval == 0:
             save_checkpoint(iteration_count)
             last_ckpt_saved_epoch = e
         
-        ################# test loop #################
-        if with_test_dataset:
-            test_loss = 0
-            test_stats = np.array([0, 0, 0, 0])     # tp, tn, fp, fn
-            for j, test_sample in enumerate(test_dataloader):
-                with torch.no_grad():
-                    cur_loss, cur_stats = forward_loop(test_sample, mode='test', cur_epoch=e)
-                    test_loss += cur_loss
-                    test_stats += cur_stats
-
-            if not no_log_flag:
-                wandb.log(
-                    {
-                        'test_loss': test_loss / len(test_dataloader),
-                        'test_accuracy': (test_stats[0] + test_stats[1]) / np.sum(test_stats), 
-                        'test_precision': test_stats[0] / (test_stats[0] + test_stats[2]), 
-                        'test_recall': test_stats[0] / (test_stats[0] + test_stats[3])
-                    }, 
-                    step=iteration_count
-                )
-            tqdm.write(f'Test: [tp, tn, fp, fn] = {test_stats}')
 
         #wandb.log({'training_loss_epoch': mean(epoch_losses)}, step=e)
-
         tqdm.write(f'Train: Mean loss: {mean(epoch_losses)}')
 
     # End training
@@ -407,6 +399,8 @@ def parse_arguments():
     parser.add_argument('--no_log', action='store_true', help='Do not log information to wandb')
     parser.add_argument('-d', '--data_dir', type=str)
     parser.add_argument('--test_dir', type=str, default=None)
+    parser.add_argument('--test_interval', type=int, default=200, help='test interval (num of iterations, "test_dir" must be specified)')
+    parser.add_argument('--full_tune', action='store_true', help='Enable to finetune both encoder and decoder')
     return parser.parse_args()
 
 if __name__ == '__main__':
