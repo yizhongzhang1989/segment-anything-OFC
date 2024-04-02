@@ -1,0 +1,5 @@
+contourpy
+matplotlib
+opencv-python
+tqdm
+wandb
