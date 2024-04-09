@@ -26,6 +26,22 @@ BUSY_TEST = os.getenv('BUSY_TEST_ON', 'False').lower() in ('true', '1')
 print('Busy test mode: ' + ('ON' if BUSY_TEST is True else 'OFF'))
 
 
+def init_weights(m):
+    if isinstance(m, nn.Conv2d):
+        if m.kernel_size == 1:
+            nn.init.constant_(m.weight, 1)
+        else:
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.Linear):
+        nn.init.xavier_normal_(m.weight)
+        nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.BatchNorm2d):  
+        nn.init.constant_(m.weight, 1)  
+        nn.init.constant_(m.bias, 0)
+        
+
 def update_learning_rate(
         optimizer: torch.optim.Optimizer, 
         current_iter: int, 
@@ -65,6 +81,7 @@ def finetune(args):
     test_iter_interval = args.test_interval
     exp_path = os.path.join('exp', args.exp_name)   #'exp/finetune_first_test'
     batch_size = args.batch_size
+    virtual_batch_size = args.virtual_batch_size
     device = args.device
     no_log_flag = args.no_log
     dataset_train_path = args.data_dir
@@ -108,7 +125,7 @@ def finetune(args):
         test_dataset = CableDataset(dataset_test_path, input_ori_shape, sam_model.image_encoder.img_size)
         test_dataloader = DataLoader(
             dataset=test_dataset, 
-            batch_size=batch_size // 4, 
+            batch_size=max(1, batch_size // 4), 
             shuffle=False,
             num_workers=4, 
             pin_memory=True
@@ -284,10 +301,18 @@ Other information:
         tp, tn, fp, fn = 0, 0, 0, 0
 
         if mode == 'train':
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
+            if virtual_batch_size is not None:
+                loss /= virtual_batch_size
+                loss.backward()
+                if iteration_count % virtual_batch_size == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    lr_scheduler.step()
+            else:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                lr_scheduler.step()
 
             iter_bar.update(cur_batch)
             iter_bar.set_description('[epoch:{}, iter:{}, loss:{:.4f}, lr:{:.6f}]'.format(cur_epoch, iteration_count, loss.item(), optimizer.param_groups[0]['lr']))
@@ -340,13 +365,13 @@ Other information:
                 os.makedirs(os.path.join(exp_path, 'details', 'busy_test', 'probs'), exist_ok=True)
                 os.makedirs(os.path.join(exp_path, 'details', 'busy_test', 'bin_masks'), exist_ok=True)
 
-                if iteration_count > 500:
+                if iteration_count > 1000:
                     return
             ######################################## TEMPERARY TEST !
 
             ################# test loop #################
             if with_test_dataset:
-                if (iteration_count % test_iter_interval == 0) or (BUSY_TEST and iteration_count % 10 == 0):
+                if (iteration_count % test_iter_interval == 0) or (BUSY_TEST and iteration_count % 20 == 0):
                     test_loss = 0
                     test_stats = np.array([0, 0, 0, 0])     # tp, tn, fp, fn
                     test_mode = 'busy_test' if BUSY_TEST else 'test' 
@@ -392,6 +417,8 @@ def parse_arguments():
     parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('-e', '--epoch_num', type=int, default=10, help='max training epoches')
     parser.add_argument('-b', '--batch_size', type=int, default=16, help='batch size')
+    parser.add_argument('--virtual_batch_size', type=int, default=None, 
+                        help='virtual batch size. True batch size = batch_size * virtual_batch_size. Determines the gradient clear interval')
     parser.add_argument('-n', '--exp_name', type=str, default='test', help='exp name. will be saved at exp/exp_name')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('-s', '--save_interval', type=int, default=2, help='checkpoint save interval (num of epoches)')

@@ -3,28 +3,73 @@ from glob import glob
 import numpy as np
 import cv2
 import torch
-from typing import Tuple, Literal, Dict, Any
+import random
+from typing import Tuple, Literal, Dict, List, Any
 from torch.utils.data import Dataset, DataLoader
 from segment_anything.utils.transforms import ResizeLongestSide
+import torchvision.transforms as transforms
+
+def get_all_image_paths(directory):  
+    valid_extensions = ['.jpg', '.png', '.jpeg', '.JPG', '.JPEG']  
+    image_paths = []
+      
+    for root, dirs, files in os.walk(directory):  
+        for file in files:  
+            if os.path.splitext(file)[1] in valid_extensions:  
+                image_paths.append(os.path.join(root, file))  
+    
+    return image_paths  
 
 
 class CableDataset(Dataset):
-    def __init__(self, data_path: str, standard_size: Tuple[int, int], size: int):
+    def __init__(
+            self, 
+            data_path: str, 
+            standard_size: Tuple[int, int], 
+            size: int, 
+            background_data_paths: List[str] = None,
+            with_augmentation: bool = False
+        ):
         """
         Args:
+            - data_path: cable dataset path, containing folders: "imgs" and "masks".
             - standard_size: (H, W), all images should be resized to this size first.
             - size: the longest side to be resized, using `ResizeLongestSide()`.
+            - background_data_paths: a list of all data paths where the background may be sampled from.
+                all .png / .jpg files in these directorys will be used randomly.
+            - with_augmentation: whether to add data augmentation to cable images (and backgrounds).
+                will be considered only of background_data_paths is specified.
         """
         self.standard_size = standard_size
         self.size = size
         self.transform = ResizeLongestSide(self.size)
-        self.images_dir_list = glob(os.path.join(data_path, 'imgs', '*.png')) + glob(os.path.join(data_path, 'imgs', '*.jpg'))
+        [os.path.join(data_path, )]
+        self.images_dir_list = get_all_image_paths(os.path.join(data_path, 'imgs'))
         self.images_dir_list.sort()
-        self.masks_dir_list = glob(os.path.join(data_path, 'masks', '*.png')) + glob(os.path.join(data_path, 'masks', '*.jpg'))
+        self.masks_dir_list = get_all_image_paths(os.path.join(data_path, 'masks'))
         self.masks_dir_list.sort()
         if len(self.images_dir_list) != len(self.masks_dir_list):
             raise Exception('Error: CableDataset: image and mask not match!')
         print('Found {} sample images / masks in directory "{}".'.format(len(self.images_dir_list), data_path))
+
+        if background_data_paths is not None:
+            self.bg_dir_list = []
+            for bg_data_path in background_data_paths:
+                self.bg_dir_list += get_all_image_paths(bg_data_path)
+            self.bg_dir_list.sort()
+            print(f'Found {len(self.bg_dir_list)} background images.')
+        else:
+            self.bg_dir_list = None
+
+        self.with_augmentation = with_augmentation
+        if with_augmentation:
+            self.cable_transform = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=1, hue=0.5)
+            self.bg_transform = transforms.Compose([
+                transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
+                transforms.RandomResizedCrop(size=standard_size, ratio=(15 / 9, 17 / 9)), 
+                transforms.GaussianBlur(kernel_size=5, sigma=(1.5, 5))
+            ])
+
 
     def __len__(self) -> int:
         return len(self.images_dir_list)
@@ -40,7 +85,26 @@ class CableDataset(Dataset):
         image = cv2.resize(image, self.standard_size[::-1], interpolation=cv2.INTER_LINEAR)
         mask = cv2.resize(mask, self.standard_size[::-1], interpolation=cv2.INTER_LINEAR)
         mask = (mask > 0)
-        # Invert
+
+        if self.bg_dir_list is not None:
+            bg_index = random.randint(0, len(self.bg_dir_list) - 1)
+            bg = cv2.imread(self.bg_dir_list[bg_index])
+            bg = cv2.cvtColor(bg, cv2.COLOR_BGR2RGB)
+            if self.with_augmentation:
+                image_torch = torch.from_numpy(image.transpose(2, 0, 1))
+                bg_torch = torch.from_numpy(bg.transpose(2, 0, 1))
+                image_torch = self.cable_transform(image_torch)
+                bg_torch = self.bg_transform(bg_torch)
+                mask_torch = torch.from_numpy(mask)
+                image_torch = torch.where(mask_torch, image_torch, bg_torch)
+                image = image_torch.numpy().transpose(1, 2, 0)
+            else:
+                bg = cv2.resize(image.shape[:2], interpolation=cv2.INTER_LINEAR)
+                image = np.where(mask, image, bg)
+        else:
+            bg = None
+
+        # Invert ?
         mask = ~mask
 
         transformed_image = self.transform.apply_image(image)
@@ -63,18 +127,28 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib
     
-    dataset_train_path = 'dataset/train/train'
-    train_dataset = CableDataset(dataset_train_path, (720, 1280), 1024)
+    dataset_train_path = 'dataset/refined_cable_dataset/train'
+    bg_paths = ['dataset/SA-1B']
+    train_dataset = CableDataset(
+        dataset_train_path, 
+        (720, 1280), 
+        1024,
+        background_data_paths=bg_paths,
+        with_augmentation=True
+    )
+
+    train_dataloader = DataLoader(dataset=train_dataset, batch_size=1, shuffle=True)
 
     print(f'ori_shape: {train_dataset.standard_size}')
-    for i, sample in enumerate(train_dataset):
+    for i, sample in enumerate(train_dataloader):
         input_image: np.ndarray = sample['image'].numpy()
         gt_mask: np.ndarray = sample['mask'].numpy()
         img_name = sample['name']
 
         print(f'current_shape: {input_image.shape}, name: {img_name}')
         
-        cv2.imwrite('exp/test/output_img.png', np.transpose(input_image, (1, 2, 0)))
+        cv2.imwrite(f'exp/dataset_test/output_img{i}.png', 
+                    cv2.cvtColor(np.transpose(input_image.squeeze(), (1, 2, 0)), cv2.COLOR_RGB2BGR))
 
-        if i > 32:
+        if i > 64:
             break
