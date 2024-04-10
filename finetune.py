@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import cv2
 import torch
 from typing import Tuple, Literal, Dict, Any
-from dataset import CableDataset
+from dataset import CableDataset, MixedCableDataset
 from torch.utils.data import Dataset, DataLoader
 from losses import *
 import argparse
@@ -82,21 +82,85 @@ def finetune(args):
     exp_path = os.path.join('exp', args.exp_name)   #'exp/finetune_first_test'
     batch_size = args.batch_size
     virtual_batch_size = args.virtual_batch_size
+    true_batch_size = batch_size if virtual_batch_size is None else batch_size * virtual_batch_size
     device = args.device
     no_log_flag = args.no_log
-    dataset_train_path = args.data_dir
-    with_test_dataset = args.test_dir is not None
-    if with_test_dataset:
-        dataset_test_path = args.test_dir
+    no_inv_dataset = args.no_inv
     is_full_finetune = args.full_tune
+    is_param_init = args.init_param
 
     os.makedirs(exp_path, exist_ok=True)
     os.makedirs(os.path.join(exp_path, 'details'), exist_ok=True)
 
+    # Set SAM model
+    sam_model = sam_model_registry[model_type](checkpoint=checkpoint)
+    if is_param_init:
+        sam_model.mask_decoder.apply(init_weights)
+    sam_model.to(device)
+    sam_model.train()
+
+
+    import yaml
+    import shutil
+    shutil.copy(args.config, os.path.join(exp_path, 'details', 'training_config.yaml'))
+    with open(args.config) as f:
+        config_yaml = yaml.load(f, Loader=yaml.FullLoader)
+
+        dataset_config = config_yaml['dataset']
+
+        print(f'image_encoder.img_size: {sam_model.image_encoder.img_size}')
+
+        train_data_subsets = []
+        train_percentages = []
+        for dataset_info in dataset_config['train']:
+            new_train_dataset = CableDataset(
+                data_path=dataset_info['data_dir'],
+                standard_size=input_ori_shape,
+                size=sam_model.image_encoder.img_size,
+                background_data_paths=dataset_info['bg_paths'],
+                with_augmentation=dataset_info['w_aug'],
+                invert=not no_inv_dataset
+            )
+            train_percentages.append(dataset_info['percentage'])
+            train_data_subsets.append(new_train_dataset)
+        
+        train_dataset = MixedCableDataset(train_data_subsets, train_percentages)
+        train_dataloader = DataLoader(
+            dataset=train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            num_workers=4, 
+            pin_memory=True
+        )
+
+        if 'test' in dataset_config and dataset_config['test'] is not None:
+            with_test_dataset = True
+            test_dataset = CableDataset(
+                data_path=dataset_config['test']['data_dir'],
+                standard_size=input_ori_shape,
+                size=sam_model.image_encoder.img_size,
+                background_data_paths=dataset_config['test']['bg_paths'],
+                with_augmentation=dataset_config['test']['w_aug'],
+                invert=not no_inv_dataset
+            )
+
+            test_dataloader = DataLoader(
+                dataset=test_dataset, 
+                batch_size=max(1, batch_size // 4), 
+                shuffle=False,
+                num_workers=4, 
+                pin_memory=True
+            )
+        else:
+            with_test_dataset = False
+
+
     ########################
     # Loss function choosing
     
-    focal_loss_fn = FocalLoss(alpha=0.25, gamma=2, reduction='mean')
+    # no_inv means: 1=cable, 0=background  =>  gt=1 : alpha=loss=0.85
+    loss_alpha = 0.85 if no_inv_dataset else 0.15
+    focal_loss_fn = FocalLoss(alpha=loss_alpha, gamma=2, reduction='mean')
     dice_loss_fn = DiceLoss()
     loss_fn = lambda x, y: 20.0 * focal_loss_fn(x, y) + 1.0 * dice_loss_fn(x, y)
     #loss_fn = None
@@ -107,29 +171,6 @@ def finetune(args):
     ########################
 
 
-    sam_model = sam_model_registry[model_type](checkpoint=checkpoint)
-    sam_model.to(device)
-    sam_model.train()
-
-    print(f'dataset_size: {sam_model.image_encoder.img_size}')
-    train_dataset = CableDataset(dataset_train_path, input_ori_shape, sam_model.image_encoder.img_size)
-    train_dataloader = DataLoader(
-        dataset=train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True,
-        num_workers=4, 
-        pin_memory=True
-    )
-
-    if with_test_dataset:
-        test_dataset = CableDataset(dataset_test_path, input_ori_shape, sam_model.image_encoder.img_size)
-        test_dataloader = DataLoader(
-            dataset=test_dataset, 
-            batch_size=max(1, batch_size // 4), 
-            shuffle=False,
-            num_workers=4, 
-            pin_memory=True
-        )
     
 
     # Set up the optimizer, hyperparameter tuning will improve performance here
@@ -159,15 +200,19 @@ def finetune(args):
         t_params_prompt_encoder = sum(p.numel() for p in sam_model.prompt_encoder.parameters() if p.requires_grad)
         t_params_mask_decoder = sum(p.numel() for p in sam_model.mask_decoder.parameters() if p.requires_grad)
         t_params_total = sum(p.numel() for p in sam_model.parameters() if p.requires_grad) 
-        log_str = f'''
-Training parameters:
+        log_str = \
+f'''
+Training details:
     learning rate (initial, after warm-up): {init_lr} 
     max epoch: {num_epoches} 
     batch_size: {batch_size} 
+    virtual_batch: {'None' if virtual_batch_size is None else f'size = {virtual_batch_size}'}
     checkpoint save interval (num of epoches): {save_epoch_interval} 
     test interval (num of iterations): {test_iter_interval} 
     device: {device} 
     finetune: {'image encoder and mask decoder' if is_full_finetune else 'mask decoder only'}
+    randomize parameters of mask decoder: {is_param_init}
+    Invert dataset so that g.t. cables = 0 : {not no_inv_dataset}
     scheduler: {lr_scheduler}
         milestones: {lr_scheduler.milestones}
         gamma: {lr_scheduler.gamma}
@@ -296,6 +341,7 @@ Other information:
             plt.imshow(input_image[0].detach().cpu().numpy().squeeze().transpose(1, 2, 0))
             plt.title('original')
             plt.savefig(os.path.join(exp_path, 'details', 'masks.png'))
+            plt.close()
         ################=================== Forward ===================################
 
         tp, tn, fp, fn = 0, 0, 0, 0
@@ -308,17 +354,21 @@ Other information:
                     optimizer.step()
                     optimizer.zero_grad()
                     lr_scheduler.step()
+                    if not no_log_flag:
+                        wandb.log({'training_loss': loss.item() * virtual_batch_size}, step=iteration_count // virtual_batch_size)
             else:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
 
+                if not no_log_flag:
+                    wandb.log({'training_loss': loss.item()}, step=iteration_count)
+
             iter_bar.update(cur_batch)
             iter_bar.set_description('[epoch:{}, iter:{}, loss:{:.4f}, lr:{:.6f}]'.format(cur_epoch, iteration_count, loss.item(), optimizer.param_groups[0]['lr']))
 
-            if not no_log_flag:
-                wandb.log({'training_loss': loss.item()}, step=iteration_count)
+            
         elif mode == 'test':
             pred_bool_masks = upscaled_mask_logits > 0
             gt_bool_masks = torch.as_tensor(gt_mask, dtype=torch.bool)
@@ -354,6 +404,9 @@ Other information:
     for e in range(1, num_epoches + 1):
         epoch_losses = []
         
+        # Resample sub-datasets
+        train_dataset.resample()
+
         # Iterate over the dataset
         for i, train_sample in enumerate(train_dataloader):
             cur_loss, _ = forward_loop(train_sample, mode='train', cur_epoch=e)
@@ -422,12 +475,12 @@ def parse_arguments():
     parser.add_argument('-n', '--exp_name', type=str, default='test', help='exp name. will be saved at exp/exp_name')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('-s', '--save_interval', type=int, default=2, help='checkpoint save interval (num of epoches)')
-    parser.add_argument('--loss', type=int, default=0, help='TEST! 0 = MSE, 1 = BCE')
-    parser.add_argument('--no_log', action='store_true', help='Do not log information to wandb')
-    parser.add_argument('-d', '--data_dir', type=str)
-    parser.add_argument('--test_dir', type=str, default=None)
     parser.add_argument('--test_interval', type=int, default=200, help='test interval (num of iterations, "test_dir" must be specified)')
+    parser.add_argument('--no_log', action='store_true', help='Do not log information to wandb')
     parser.add_argument('--full_tune', action='store_true', help='Enable to finetune both encoder and decoder')
+    parser.add_argument('--init_param', action='store_true', help='Enable to randomly initialize parameters of mask decoder')
+    parser.add_argument('--no_inv', action='store_true', help='Do not invert dataset masks')
+    parser.add_argument('-c', '--config', type=str, default=None, help='Config path')
     return parser.parse_args()
 
 if __name__ == '__main__':

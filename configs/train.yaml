@@ -1,0 +1,16 @@
+dataset:
+  train:
+    - data_dir: dataset/refined_cable_dataset/train
+      bg_paths:
+        - dataset/SA-1B
+      w_aug: true
+      percentage: 1
+    - data_dir: dataset/p_cable_dataset/train
+      bg_paths: null
+      w_aug: false
+      percentage: 0.1
+  test:
+    data_dir: dataset/refined_cable_dataset/test
+    bg_paths: null
+    w_aug: false
+  

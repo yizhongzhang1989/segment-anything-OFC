@@ -28,7 +28,8 @@ class CableDataset(Dataset):
             standard_size: Tuple[int, int], 
             size: int, 
             background_data_paths: List[str] = None,
-            with_augmentation: bool = False
+            with_augmentation: bool = False, 
+            invert: bool = False
         ):
         """
         Args:
@@ -39,11 +40,12 @@ class CableDataset(Dataset):
                 all .png / .jpg files in these directorys will be used randomly.
             - with_augmentation: whether to add data augmentation to cable images (and backgrounds).
                 will be considered only of background_data_paths is specified.
+            - invert: whether to invert g.t. mask
         """
         self.standard_size = standard_size
         self.size = size
+        self.invert = invert
         self.transform = ResizeLongestSide(self.size)
-        [os.path.join(data_path, )]
         self.images_dir_list = get_all_image_paths(os.path.join(data_path, 'imgs'))
         self.images_dir_list.sort()
         self.masks_dir_list = get_all_image_paths(os.path.join(data_path, 'masks'))
@@ -105,7 +107,8 @@ class CableDataset(Dataset):
             bg = None
 
         # Invert ?
-        mask = ~mask
+        if self.invert:
+            mask = ~mask
 
         transformed_image = self.transform.apply_image(image)
         transformed_image = torch.as_tensor(transformed_image, device='cpu')
@@ -122,24 +125,62 @@ class CableDataset(Dataset):
         }
         
 
+class MixedCableDataset(Dataset):
+    def __init__(
+            self, 
+            datasets: List[CableDataset], 
+            percentages: List[float], 
+        ):
+        if len(datasets) != len(percentages):
+            raise Exception('Error: MixedDataset::__init__: lengths of datasets and percentages not match')
+        self.datasets = datasets
+        self.counts = [int(len(datasets[i]) * percentages[i]) for i in range(len(datasets))]
+        print(f'Mixed dataset: sample counts are {self.counts} respectively')
+        self.resample()
+
+    
+    def __len__(self) -> int:
+        return len(self.dataset_idxs)
+    
+    def __getitem__(self, index) -> Dict[Literal['image', 'mask', 'name'], Any]:
+        dataset_idx = self.dataset_idxs[index]
+        return self.datasets[dataset_idx[0]][dataset_idx[1]]
+
+    def resample(self):
+        """
+        Resample the data indices in sub-datasets
+        """
+        self.dataset_idxs = []
+        for i in range(len(self.datasets)):
+            self.dataset_idxs += random.sample([(i, j) for j in range(len(self.datasets[i]))], self.counts[i])
+
+
+
 if __name__ == '__main__':
     from tqdm import tqdm
     import matplotlib.pyplot as plt
     import matplotlib
     
-    dataset_train_path = 'dataset/refined_cable_dataset/train'
     bg_paths = ['dataset/SA-1B']
-    train_dataset = CableDataset(
-        dataset_train_path, 
+    train_dataset_1 = CableDataset(
+        'dataset/refined_cable_dataset/train', 
         (720, 1280), 
         1024,
         background_data_paths=bg_paths,
         with_augmentation=True
     )
 
-    train_dataloader = DataLoader(dataset=train_dataset, batch_size=1, shuffle=True)
+    train_dataset_2 = CableDataset(
+        'dataset/p_cable_dataset/train', 
+        (720, 1280), 
+        1024
+    )
 
-    print(f'ori_shape: {train_dataset.standard_size}')
+    mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2], [1, 0.5])
+
+    train_dataloader = DataLoader(dataset=mixed_train_dataset, batch_size=1, shuffle=True)
+
+    print(f'ori_shape: {train_dataset_1.standard_size}')
     for i, sample in enumerate(train_dataloader):
         input_image: np.ndarray = sample['image'].numpy()
         gt_mask: np.ndarray = sample['mask'].numpy()
