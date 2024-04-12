@@ -84,6 +84,7 @@ def finetune(args):
     virtual_batch_size = args.virtual_batch_size
     true_batch_size = batch_size if virtual_batch_size is None else batch_size * virtual_batch_size
     device = args.device
+    predefined_cable_alpha = args.alpha
     no_log_flag = args.no_log
     no_inv_dataset = args.no_inv
     is_full_finetune = args.full_tune
@@ -159,7 +160,10 @@ def finetune(args):
     # Loss function choosing
     
     # no_inv means: 1=cable, 0=background  =>  gt=1 : alpha=loss=0.85
-    loss_alpha = 0.85 if no_inv_dataset else 0.15
+    if predefined_cable_alpha is None:
+        loss_alpha = 0.85 if no_inv_dataset else 0.15
+    else:
+        loss_alpha = predefined_cable_alpha if no_inv_dataset else (1 - predefined_cable_alpha)
     focal_loss_fn = FocalLoss(alpha=loss_alpha, gamma=2, reduction='mean')
     dice_loss_fn = DiceLoss()
     loss_fn = lambda x, y: 20.0 * focal_loss_fn(x, y) + 1.0 * dice_loss_fn(x, y)
@@ -216,7 +220,9 @@ Training details:
     scheduler: {lr_scheduler}
         milestones: {lr_scheduler.milestones}
         gamma: {lr_scheduler.gamma}
-Loss funtion: {loss_fn}
+Loss:
+    loss funtion: {loss_fn}
+    focal loss alpha (when g.t = 1): {loss_alpha}
 Model parameters:
     image encoder: {t_params_img_encoder}
     prompt encoder: {t_params_prompt_encoder}
@@ -479,6 +485,7 @@ def parse_arguments():
     parser.add_argument('--no_log', action='store_true', help='Do not log information to wandb')
     parser.add_argument('--full_tune', action='store_true', help='Enable to finetune both encoder and decoder')
     parser.add_argument('--init_param', action='store_true', help='Enable to randomly initialize parameters of mask decoder')
+    parser.add_argument('--alpha', type=float, default=None, help='Alpha value (0, 1) for focal loss where there are cables')
     parser.add_argument('--no_inv', action='store_true', help='Do not invert dataset masks')
     parser.add_argument('-c', '--config', type=str, default=None, help='Config path')
     return parser.parse_args()
