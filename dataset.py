@@ -65,11 +65,15 @@ class CableDataset(Dataset):
 
         self.with_augmentation = with_augmentation
         if with_augmentation:
-            self.cable_transform = transforms.ColorJitter(brightness=0.4, contrast=0.15, saturation=0.15, hue=0.5)
+            self.cable_transform = transforms.RandomApply(torch.nn.ModuleList([
+                transforms.ColorJitter(brightness=0.4, contrast=0.15, saturation=0.15, hue=0.5)
+            ]), p=0.5)
             self.bg_transform = transforms.Compose([
-                transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
                 transforms.RandomResizedCrop(size=standard_size, ratio=(15 / 9, 17 / 9)), 
-                transforms.GaussianBlur(kernel_size=5, sigma=(1.5, 5))
+                transforms.RandomApply(torch.nn.ModuleList([
+                    transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
+                    transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))
+                ]), p=0.5)
             ])
 
 
