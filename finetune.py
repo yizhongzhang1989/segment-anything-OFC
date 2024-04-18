@@ -85,6 +85,9 @@ def finetune(args):
     sam_model.train()
 
 
+
+    ######################################################
+    # setup dataset (a mix of multiple cable datasets)
     import yaml
     import shutil
     shutil.copy(args.config, os.path.join(exp_path, 'details', 'training_config.yaml'))
@@ -301,6 +304,11 @@ Other information:
             - (true positive, true negative, false positive, false negative), only if mode == 'test'
         """
         nonlocal iteration_count
+
+        if mode == 'train':
+            sam_model.train()
+        else:
+            sam_model.eval()
 
         input_image = sample['image'].to(device)
         gt_mask = sample['mask'].to(device)
