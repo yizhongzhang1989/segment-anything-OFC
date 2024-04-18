@@ -65,7 +65,7 @@ class CableDataset(Dataset):
 
         self.with_augmentation = with_augmentation
         if with_augmentation:
-            self.cable_transform = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=1, hue=0.5)
+            self.cable_transform = transforms.ColorJitter(brightness=0.4, contrast=0.15, saturation=0.15, hue=0.5)
             self.bg_transform = transforms.Compose([
                 transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
                 transforms.RandomResizedCrop(size=standard_size, ratio=(15 / 9, 17 / 9)), 

@@ -2,18 +2,28 @@ dataset:
   train:
     - data_dir: ../data/cable_synthetic/240412_data
       bg_paths:
-        - ../data/SA-1B
+        - ../data/240417_rack_background
+      w_aug: true
+      percentage: 0.5
+    - data_dir: ../data/cable_synthetic/240417_data_iteration_2
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      percentage: 1
+    - data_dir: ../data/cable_synthetic/240418_data_iteration_3
+      bg_paths:
+        - ../data/240417_rack_background
       w_aug: true
       percentage: 1
     - data_dir: ../data/refined_cable_dataset/train
       bg_paths:
         - ../data/SA-1B
       w_aug: true
-      percentage: 1
+      percentage: 0.3
     - data_dir: ../data/p_cable_dataset/train
       bg_paths: null
       w_aug: false
-      percentage: 0.1
+      percentage: 0.04
   test:
     data_dir: ../data/refined_cable_dataset/test
     bg_paths: null

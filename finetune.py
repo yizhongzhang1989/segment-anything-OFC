@@ -40,22 +40,6 @@ def init_weights(m):
     elif isinstance(m, nn.BatchNorm2d):  
         nn.init.constant_(m.weight, 1)  
         nn.init.constant_(m.bias, 0)
-        
-
-def update_learning_rate(
-        optimizer: torch.optim.Optimizer, 
-        current_iter: int, 
-        warmup_iters: int, 
-        initial_lr: float
-    ):
-    if current_iter < warmup_iters:  
-        # lr linear warm up  
-        lr = initial_lr * (current_iter / warmup_iters)  
-        for param_group in optimizer.param_groups:  
-            param_group['lr'] = lr  
-    else:
-        pass
-        # do nothing
     
 
 
@@ -179,18 +163,50 @@ def finetune(args):
 
     # Set up the optimizer, hyperparameter tuning will improve performance here
     wd = 0
-    warm_up_iterations = 250
+    #warm_up_iterations = 250        # SAM paper setup: 250
+    warm_up_iterations = 1000
+    lr_decay_interval = 100
+    lr_decay_gamma = 0.98946         # after 500 * 100 iterations lr is decreased by 5e-3
+    # every <lr_decay_interval> iterations after warm-up, lr is decreased by lr_decay_gamma
+
+    final_learning_rate = 1e-7      # The lower bound of lr
     optimizer = torch.optim.Adam(sam_model.mask_decoder.parameters(), lr=0, weight_decay=wd)
     #lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
     #    optimizer=optimizer, 
     #    milestones=[6000, 8666],
     #    gamma=0.2
     #)
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer=optimizer, 
-        milestones=[600, 1200, 1800, 2400, 3000, 4000, 6000, 9000, 12000, 15000],
-        gamma=0.6
-    )
+    # lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    #     optimizer=optimizer, 
+    #     milestones=[600, 1200, 1800, 2400, 3000, 4000, 6000, 9000, 12000, 15000],
+    #     gamma=0.6
+    # )
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        
+    # )
+    lr_scheduler = None
+
+
+    # Manually designed function to update lr.
+    def update_learning_rate(
+        optimizer: torch.optim.Optimizer, 
+        current_iter: int
+    ):
+        if current_iter < warm_up_iterations:  
+            # lr linear warm up  
+            lr = init_lr * (current_iter / warm_up_iterations)  
+            for param_group in optimizer.param_groups:  
+                param_group['lr'] = lr
+        else:
+            if (current_iter - warm_up_iterations) % lr_decay_interval == 0:
+                exp_val = (current_iter - warm_up_iterations) / lr_decay_interval
+                lr = init_lr * (lr_decay_gamma ** exp_val)
+                lr = max(final_learning_rate, lr)
+                for param_group in optimizer.param_groups:  
+                    param_group['lr'] = lr
+            #pass
+            # do nothing
+    ############################################################################
 
     def save_checkpoint(iter_num):
         tqdm.write('Saving checkpoint...')
@@ -204,10 +220,17 @@ def finetune(args):
         t_params_prompt_encoder = sum(p.numel() for p in sam_model.prompt_encoder.parameters() if p.requires_grad)
         t_params_mask_decoder = sum(p.numel() for p in sam_model.mask_decoder.parameters() if p.requires_grad)
         t_params_total = sum(p.numel() for p in sam_model.parameters() if p.requires_grad) 
+
+        log_scheduler_str = \
+f'''
+scheduler: {lr_scheduler}
+            milestones: {lr_scheduler.milestones}
+            gamma: {lr_scheduler.gamma} 
+''' if lr_scheduler is not None else 'torch.optim.lr_scheduler is not used.'
+        
         log_str = \
 f'''
 Training details:
-    learning rate (initial, after warm-up): {init_lr} 
     max epoch: {num_epoches} 
     batch_size: {batch_size} 
     virtual_batch: {'None' if virtual_batch_size is None else f'size = {virtual_batch_size}'}
@@ -217,9 +240,13 @@ Training details:
     finetune: {'image encoder and mask decoder' if is_full_finetune else 'mask decoder only'}
     randomize parameters of mask decoder: {is_param_init}
     Invert dataset so that g.t. cables = 0 : {not no_inv_dataset}
-    scheduler: {lr_scheduler}
-        milestones: {lr_scheduler.milestones}
-        gamma: {lr_scheduler.gamma}
+    Learning rate schedule details:
+        learning rate (initial, after warm-up): {init_lr} 
+        final_lr (lr lower bound): {final_learning_rate}
+        warm_up: {warm_up_iterations} iters
+        lr_decay_interval: {lr_decay_interval}
+        lr_decay_gamma: {lr_decay_gamma}
+        {log_scheduler_str}
 Loss:
     loss funtion: {loss_fn}
     focal loss alpha (when g.t = 1): {loss_alpha}
@@ -284,7 +311,7 @@ Other information:
 
         if mode == 'train':
             iteration_count += 1
-            update_learning_rate(optimizer, iteration_count, warm_up_iterations, init_lr)
+            update_learning_rate(optimizer, iteration_count)
 
         ################=================== Forward ===================################
         # full finetune
@@ -359,20 +386,20 @@ Other information:
                 if iteration_count % virtual_batch_size == 0:
                     optimizer.step()
                     optimizer.zero_grad()
-                    lr_scheduler.step()
+                    #lr_scheduler.step()
                     if not no_log_flag:
                         wandb.log({'training_loss': loss.item() * virtual_batch_size}, step=iteration_count // virtual_batch_size)
             else:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                lr_scheduler.step()
+                #lr_scheduler.step()
 
                 if not no_log_flag:
                     wandb.log({'training_loss': loss.item()}, step=iteration_count)
 
             iter_bar.update(cur_batch)
-            iter_bar.set_description('[epoch:{}, iter:{}, loss:{:.4f}, lr:{:.6f}]'.format(cur_epoch, iteration_count, loss.item(), optimizer.param_groups[0]['lr']))
+            iter_bar.set_description('[epoch:{}, iter:{}, loss:{:.4f}, lr:{:.8f}]'.format(cur_epoch, iteration_count, loss.item(), optimizer.param_groups[0]['lr']))
 
             
         elif mode == 'test':

@@ -1,6 +1,6 @@
 dataset:
   train:
-    - data_dir: ../data/240412_data
+    - data_dir: ../data/cable_synthetic/240412_data
       bg_paths:
         - ../data/SA-1B
       w_aug: true
