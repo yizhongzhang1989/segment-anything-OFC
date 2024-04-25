@@ -107,6 +107,7 @@ def finetune(args):
                 size=sam_model.image_encoder.img_size,
                 background_data_paths=dataset_info['bg_paths'],
                 with_augmentation=dataset_info['w_aug'],
+                augmentation_details=dataset_info['aug_details'] if (dataset_info['w_aug'] == True and 'aug_details' in dataset_info) else [], 
                 invert=not no_inv_dataset
             )
             train_percentages.append(dataset_info['percentage'])

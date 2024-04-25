@@ -29,6 +29,7 @@ class CableDataset(Dataset):
             size: int, 
             background_data_paths: List[str] = None,
             with_augmentation: bool = False, 
+            augmentation_details: List[str] = [], 
             invert: bool = False
         ):
         """
@@ -45,13 +46,15 @@ class CableDataset(Dataset):
         self.standard_size = standard_size
         self.size = size
         self.invert = invert
+
+        # SAM provided transformation to resize the image and let the longest side = self.size
         self.transform = ResizeLongestSide(self.size)
         self.images_dir_list = get_all_image_paths(os.path.join(data_path, 'imgs'))
         self.images_dir_list.sort()
         self.masks_dir_list = get_all_image_paths(os.path.join(data_path, 'masks'))
         self.masks_dir_list.sort()
         if len(self.images_dir_list) != len(self.masks_dir_list):
-            raise Exception('Error: CableDataset: image and mask not match!')
+            raise Exception('Error: CableDataset: image and mask do not match!')
         print('Found {} sample images / masks in directory "{}".'.format(len(self.images_dir_list), data_path))
 
         if background_data_paths is not None:
@@ -64,17 +67,39 @@ class CableDataset(Dataset):
             self.bg_dir_list = None
 
         self.with_augmentation = with_augmentation
+
+        # transformations (data aug.)
+        self.cable_transform = None         # data aug. on foreground cables (RGB image)
+        self.foreground_transform = None    # data aug. on foreground (both RGB image and mask)
+        self.bg_transform = None            # data aug. on background RGB image 
+                                            # (or if there is no foreground, applied on the entire image)
+
         if with_augmentation:
-            self.cable_transform = transforms.RandomApply(torch.nn.ModuleList([
-                transforms.ColorJitter(brightness=0.4, contrast=0.15, saturation=0.15, hue=0.5)
-            ]), p=0.5)
-            self.bg_transform = transforms.Compose([
-                transforms.RandomResizedCrop(size=standard_size, ratio=(15 / 9, 17 / 9)), 
-                transforms.RandomApply(torch.nn.ModuleList([
-                    transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
-                    transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))
+            if self.bg_dir_list is not None:
+                self.cable_transform = transforms.RandomApply(torch.nn.ModuleList([
+                        transforms.ColorJitter(brightness=0.4, contrast=0.15, saturation=0.15, hue=0.5)
+                    ]), p=0.5)
+                self.bg_transform = transforms.Compose([
+                    transforms.RandomResizedCrop(size=standard_size, ratio=(15 / 9, 17 / 9)), 
+                    transforms.RandomApply(torch.nn.ModuleList([
+                        transforms.ColorJitter(brightness=(0.5, 1), contrast=0.2, saturation=0.2, hue=0),
+                        transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))
+                    ]), p=0.5)
+                ])
+
+                if 'crop_foreground' in augmentation_details:
+                    self.foreground_transform = transforms.RandomApply(torch.nn.ModuleList([
+                        transforms.RandomResizedCrop(
+                            size=standard_size, 
+                            scale=(0.35, 1), 
+                            ratio=(standard_size[1] / standard_size[0], standard_size[1] / standard_size[0])
+                        )
+                    ]), p=0.5)
+
+            else:
+                self.bg_transform = transforms.RandomApply(torch.nn.ModuleList([
+                    transforms.ColorJitter(brightness=0.1, contrast=0, saturation=0, hue=0.5)
                 ]), p=0.5)
-            ])
 
 
     def __len__(self) -> int:
@@ -92,6 +117,8 @@ class CableDataset(Dataset):
         mask = cv2.resize(mask, self.standard_size[::-1], interpolation=cv2.INTER_LINEAR)
         mask = (mask > 0)
 
+        mask_torch = torch.as_tensor(mask, dtype=torch.bool)
+
         if self.bg_dir_list is not None:
             bg_index = random.randint(0, len(self.bg_dir_list) - 1)
             bg = cv2.imread(self.bg_dir_list[bg_index])
@@ -101,18 +128,27 @@ class CableDataset(Dataset):
                 bg_torch = torch.from_numpy(bg.transpose(2, 0, 1))
                 image_torch = self.cable_transform(image_torch)
                 bg_torch = self.bg_transform(bg_torch)
-                mask_torch = torch.from_numpy(mask)
+                if self.foreground_transform is not None:
+                    img_mask_concat = torch.cat((image_torch, mask_torch[None, ...]), dim=0)
+                    img_mask_concat = self.foreground_transform(img_mask_concat)
+                    image_torch = img_mask_concat[:-1, ...]
+                    mask_torch = img_mask_concat[-1, ...]
+                mask_torch = mask_torch > 0
                 image_torch = torch.where(mask_torch, image_torch, bg_torch)
                 image = image_torch.numpy().transpose(1, 2, 0)
             else:
                 bg = cv2.resize(image.shape[:2], interpolation=cv2.INTER_LINEAR)
                 image = np.where(mask, image, bg)
         else:
+            if self.with_augmentation:
+                image_torch = torch.from_numpy(image.transpose(2, 0, 1))
+                image_torch = self.bg_transform(image_torch)
+                image = image_torch.numpy().transpose(1, 2, 0)
             bg = None
 
         # Invert ?
         if self.invert:
-            mask = ~mask
+            mask_torch = ~mask_torch
 
         transformed_image = self.transform.apply_image(image)
         transformed_image = torch.as_tensor(transformed_image, device='cpu')
@@ -120,11 +156,12 @@ class CableDataset(Dataset):
         transformed_image = transformed_image.permute(2, 0, 1).contiguous()
 
         # add C channel -> (1, H, W)
-        mask = torch.as_tensor(mask, device='cpu')[None, ...]
+        mask_torch = mask_torch[None, ...]
+        #mask = torch.as_tensor(mask, device='cpu')[None, ...]
 
         return {
-            'image': transformed_image, 
-            'mask': mask, 
+            'image': transformed_image,         # torch.uint8
+            'mask': mask_torch,                 # torch.bool
             'name': os.path.basename(self.images_dir_list[index])
         }
         
@@ -136,7 +173,7 @@ class MixedCableDataset(Dataset):
             percentages: List[float], 
         ):
         if len(datasets) != len(percentages):
-            raise Exception('Error: MixedDataset::__init__: lengths of datasets and percentages not match')
+            raise Exception('Error: MixedDataset::__init__: lengths of datasets and percentages do not match')
         self.datasets = datasets
         self.counts = [int(len(datasets[i]) * percentages[i]) for i in range(len(datasets))]
         print(f'Mixed dataset: sample counts are {self.counts} respectively')
@@ -165,22 +202,43 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib
     
-    bg_paths = ['dataset/SA-1B']
+    #bg_paths = ['dataset/SA-1B']
+    bg_paths = ['dataset/240417_rack_background']
     train_dataset_1 = CableDataset(
-        'dataset/refined_cable_dataset/train', 
+        'dataset/cable_synthetic/240412_data', 
         (720, 1280), 
         1024,
         background_data_paths=bg_paths,
-        with_augmentation=True
+        with_augmentation=True, 
+        augmentation_details=['crop_foreground'], 
+        invert=True
     )
-
     train_dataset_2 = CableDataset(
-        'dataset/p_cable_dataset/train', 
+        'dataset/cable_synthetic/240417_data_iteration_2', 
         (720, 1280), 
-        1024
+        1024,
+        background_data_paths=bg_paths,
+        with_augmentation=True, 
+        invert=True
+    )
+    train_dataset_3 = CableDataset(
+        'dataset/cable_synthetic/240418_data_iteration_3', 
+        (720, 1280), 
+        1024,
+        background_data_paths=bg_paths,
+        with_augmentation=True, 
+        augmentation_details=['crop_foreground'], 
+        invert=True
     )
 
-    mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2], [1, 0.5])
+    # train_dataset_2 = CableDataset(
+    #     'dataset/p_cable_dataset/train', 
+    #     (720, 1280), 
+    #     1024
+    # )
+
+    #mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2], [1, 0.5])
+    mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2, train_dataset_3], [0.5, 1, 1])
 
     train_dataloader = DataLoader(dataset=mixed_train_dataset, batch_size=1, shuffle=True)
 

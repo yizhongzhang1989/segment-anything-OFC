@@ -1,0 +1,33 @@
+dataset:
+  train:
+    - data_dir: ../data/cable_synthetic/240412_data
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 0.5
+    - data_dir: ../data/cable_synthetic/240417_data_iteration_2
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 1
+    - data_dir: ../data/cable_synthetic/240418_data_iteration_3
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 1
+    - data_dir: ../data/refined_cable_dataset/train
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      percentage: 0.3
+  test:
+    data_dir: ../data/refined_cable_dataset/test
+    bg_paths: null
+    w_aug: false
+  
