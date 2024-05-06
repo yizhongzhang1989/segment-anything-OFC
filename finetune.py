@@ -215,8 +215,8 @@ def finetune(args):
     def save_checkpoint(iter_num):
         tqdm.write('Saving checkpoint...')
         os.makedirs(os.path.join(exp_path, 'ckpts'), exist_ok=True)
-        torch.save(sam_model.state_dict(), os.path.join(exp_path, 'ckpts', 'ckpt_{:0>5d}_b{}.pth'.format(iter_num, batch_size)))
-        torch.save(optimizer.state_dict(), os.path.join(exp_path, 'ckpts', 'optimizer_{:0>5d}_b{}.pth'.format(iter_num, batch_size)))
+        torch.save(sam_model.state_dict(), os.path.join(exp_path, 'ckpts', 'ckpt_{:0>7d}_b{}.pth'.format(iter_num, batch_size)))
+        torch.save(optimizer.state_dict(), os.path.join(exp_path, 'ckpts', 'optimizer_{:0>7d}_b{}.pth'.format(iter_num, batch_size)))
         tqdm.write('Checkpoint saved.')
 
     def log_init_info():

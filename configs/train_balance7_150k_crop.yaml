@@ -1,0 +1,29 @@
+dataset:
+  train:
+    - data_dir: ../data/cable_synthetic/240429_synthetic-cable-detection_150k/original
+      bg_paths:
+        - ../data/240417_rack_background
+        - ../data/240430_clear_bg
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 0.1
+    - data_dir: ../data/cable_synthetic/240429_synthetic-cable-detection_150k/close-up
+      bg_paths:
+        - ../data/240417_rack_background
+        - ../data/240430_clear_bg
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 0.2
+    - data_dir: ../data/refined_cable_dataset/train
+      bg_paths:
+        - ../data/240417_rack_background
+        - ../data/240430_clear_bg
+      w_aug: true
+      percentage: 1
+  test:
+    data_dir: ../data/refined_cable_dataset/test
+    bg_paths: null
+    w_aug: false
+  

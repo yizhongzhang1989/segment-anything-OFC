@@ -1,0 +1,14 @@
+dataset:
+  train:
+    - data_dir: ../data/cable_synthetic/240424_synthetic-cable-detection
+      bg_paths:
+        - ../data/240417_rack_background
+      w_aug: true
+      aug_details:
+        - crop_foreground
+      percentage: 1
+  test:
+    data_dir: ../data/refined_cable_dataset/test
+    bg_paths: null
+    w_aug: false
+  

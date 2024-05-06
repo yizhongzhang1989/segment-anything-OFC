@@ -201,48 +201,87 @@ if __name__ == '__main__':
     from tqdm import tqdm
     import matplotlib.pyplot as plt
     import matplotlib
-    
-    #bg_paths = ['dataset/SA-1B']
-    bg_paths = ['dataset/240417_rack_background']
-    train_dataset_1 = CableDataset(
-        'dataset/cable_synthetic/240412_data', 
-        (720, 1280), 
-        1024,
-        background_data_paths=bg_paths,
-        with_augmentation=True, 
-        augmentation_details=['crop_foreground'], 
-        invert=True
-    )
-    train_dataset_2 = CableDataset(
-        'dataset/cable_synthetic/240417_data_iteration_2', 
-        (720, 1280), 
-        1024,
-        background_data_paths=bg_paths,
-        with_augmentation=True, 
-        invert=True
-    )
-    train_dataset_3 = CableDataset(
-        'dataset/cable_synthetic/240418_data_iteration_3', 
-        (720, 1280), 
-        1024,
-        background_data_paths=bg_paths,
-        with_augmentation=True, 
-        augmentation_details=['crop_foreground'], 
-        invert=True
-    )
 
-    # train_dataset_2 = CableDataset(
-    #     'dataset/p_cable_dataset/train', 
-    #     (720, 1280), 
-    #     1024
-    # )
+    config_file_path = 'configs/train_balance8_40+50k_crop.yaml'
+    def training_dataset_setup() -> DataLoader:
+        import yaml
 
-    #mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2], [1, 0.5])
-    mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2, train_dataset_3], [0.5, 1, 1])
+        with open(config_file_path) as f:
+            config_yaml = yaml.load(f, Loader=yaml.FullLoader)
 
-    train_dataloader = DataLoader(dataset=mixed_train_dataset, batch_size=1, shuffle=True)
+        dataset_config = config_yaml['dataset']
 
-    print(f'ori_shape: {train_dataset_1.standard_size}')
+        train_data_subsets = []
+        train_percentages = []
+        for dataset_info in dataset_config['train']:
+            new_train_dataset = CableDataset(
+                data_path=dataset_info['data_dir'],
+                standard_size=(720, 1280),
+                size=1024,
+                background_data_paths=dataset_info['bg_paths'],
+                with_augmentation=dataset_info['w_aug'],
+                augmentation_details=dataset_info['aug_details'] if (dataset_info['w_aug'] == True and 'aug_details' in dataset_info) else [], 
+                invert=True
+            )
+            train_percentages.append(dataset_info['percentage'])
+            train_data_subsets.append(new_train_dataset)
+        
+        train_dataset = MixedCableDataset(train_data_subsets, train_percentages)
+        train_dataloader = DataLoader(
+            dataset=train_dataset, 
+            batch_size=1, 
+            shuffle=True,
+            num_workers=4, 
+            pin_memory=True
+        )
+        return train_dataloader
+
+    def custom_dataset_setup() -> DataLoader:
+        #bg_paths = ['dataset/SA-1B']
+        bg_paths = ['dataset/240417_rack_background']
+        train_dataset_1 = CableDataset(
+            'dataset/cable_synthetic/240412_data', 
+            (720, 1280), 
+            1024,
+            background_data_paths=bg_paths,
+            with_augmentation=True, 
+            augmentation_details=['crop_foreground'], 
+            invert=True
+        )
+        train_dataset_2 = CableDataset(
+            'dataset/cable_synthetic/240417_data_iteration_2', 
+            (720, 1280), 
+            1024,
+            background_data_paths=bg_paths,
+            with_augmentation=True, 
+            invert=True
+        )
+        train_dataset_3 = CableDataset(
+            'dataset/cable_synthetic/240418_data_iteration_3', 
+            (720, 1280), 
+            1024,
+            background_data_paths=bg_paths,
+            with_augmentation=True, 
+            augmentation_details=['crop_foreground'], 
+            invert=True
+        )
+
+        print(f'ori_shape: {train_dataset_1.standard_size}')
+
+        # train_dataset_2 = CableDataset(
+        #     'dataset/p_cable_dataset/train', 
+        #     (720, 1280), 
+        #     1024
+        # )
+
+        #mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2], [1, 0.5])
+        mixed_train_dataset = MixedCableDataset([train_dataset_1, train_dataset_2, train_dataset_3], [0.5, 1, 1])
+
+        train_dataloader = DataLoader(dataset=mixed_train_dataset, batch_size=1, shuffle=True)
+        return train_dataloader
+
+    train_dataloader = training_dataset_setup()
+
     for i, sample in enumerate(train_dataloader):
         input_image: np.ndarray = sample['image'].numpy()
         gt_mask: np.ndarray = sample['mask'].numpy()
@@ -250,8 +289,8 @@ if __name__ == '__main__':
 
         print(f'current_shape: {input_image.shape}, name: {img_name}')
         
-        cv2.imwrite(f'exp/dataset_test/output_img{i}.png', 
+        cv2.imwrite(f'exp/dataset_sample_2/sample_img{i}.png', 
                     cv2.cvtColor(np.transpose(input_image.squeeze(), (1, 2, 0)), cv2.COLOR_RGB2BGR))
 
-        if i > 64:
+        if i >= 199:
             break
